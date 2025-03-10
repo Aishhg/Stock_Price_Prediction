@@ -1,126 +1,130 @@
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from keras.models import Sequential
-from keras.layers import LSTM, Dense
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 import streamlit as st
+import yfinance as yf
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 
-model_cache = {}
+# -------------------- Streamlit UI --------------------
+st.set_page_config(page_title="Stock Price Prediction", page_icon="📈", layout="wide")
 
+# 🌟 Stylish Page Heading
+st.markdown(
+    """
+    <style>
+        .header {
+            background-color: black;
+            color: white;
+            text-align: center;
+            padding: 30px;
+            font-size: 36px;
+            font-weight: bold;
+            border-radius: 10px;
+        }
+        .stSelectbox, .stButton>button {
+            font-size: 18px !important;
+        }
+        .stAlert {
+            font-size: 16px;
+        }
+        .table-container {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown('<div class="header">📊 Stock Price Prediction</div>', unsafe_allow_html=True)
+
+# -------------------- Fetch Stock Data --------------------
 def fetch_data(symbol):
     stock = yf.Ticker(symbol)
     data = stock.history(period="5y")
+    if data.empty:
+        return None
     return data[['Close']]
 
-def preprocess_data(df):
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['EMA_50'] = df['Close'].ewm(span=20, adjust=False).mean()
-    df['Daily_Return'] = df['Close'].pct_change()
-    df['Log_Return'] = np.log(df['Close'] / df['Close'].shift(1))
-
-    delta = df['Close'].diff(1)
-    gain = (delta.where(delta >0,0)).rolling(window=14).mean()
-    loss = (-delta.where(delta<0,0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI_14'] = 100 -(100 / (1 + rs))
-    df['Middle_Band'] = df['Close'].rolling(window=20).mean()
-    df['Upper_Band'] = df['Middle_Band'] + (df['Close'].rolling(window=20).std() * 2)
-    df['Lower_Band'] = df['Middle_Band'] - (df['Close'].rolling(window=20).std() * 2)
-    df['Momentum'] = df['Close'] - df['Close'].shift(4)
-    df['Volatility'] = df['Close'].rolling(window=21).std()
-
-    df.dropna(inplace=True)
-    return df
-
+# -------------------- Data Preprocessing --------------------
 def normalize_data(df):
+    if df is None or df.empty:
+        return None, None
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(df[['Close']])
     return scaled_data, scaler
 
-def prepare_data(scaled_data, time_steps=60):
+# -------------------- Model Training --------------------
+def train_lstm(data):
     X, y = [], []
-    for i in range(time_steps, len(scaled_data)):
-        X.append(scaled_data[i - time_steps:i])
-        y.append(scaled_data[i,0])
-    return np.array(X), np.array(y)
+    for i in range(50, len(data)):
+        X.append(data[i-50:i, 0])
+        y.append(data[i, 0])
 
-def build_model(input_shape):
+    X, y = np.array(X), np.array(y)
+    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+
     model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=input_shape),
+        LSTM(50, return_sequences=True, input_shape=(X.shape[1], 1)),
+        Dropout(0.2),
         LSTM(50, return_sequences=False),
+        Dropout(0.2),
         Dense(25),
         Dense(1)
     ])
-    model.compile(optimizer='adam', loss = 'mean_squared_error')
+    
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.fit(X, y, epochs=10, batch_size=16, verbose=0)
     return model
 
-st.title('Stock Price Prediction')
+# -------------------- Streamlit UI --------------------
+stock_list = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA']
+selected_stock = st.selectbox('💡 Select a Stock:', stock_list)
 
-stock_list = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN']
-selected_stock = st.selectbox('Select the Stock:', stock_list)
-
-st.write(f"Fetching data for {selected_stock}...")
 data = fetch_data(selected_stock)
-latest_price = data['Close'].iloc[-1]
-st.write(f'Latest Price: ${latest_price:.2f}')
 
-if st.button("Train and Predict"):
-    st.write("Please Wait...")
+if data is None:
+    st.error("⚠️ No data available for the selected stock. Please try another.")
+else:
+    st.markdown(f"📉 **Latest Price:** ${data['Close'].iloc[-1]:.2f}")
 
-    if selected_stock in model_cache:
-        model, scaler = model_cache[selected_stock]
-    else:
-        data = preprocess_data(data)
+    if st.button("🚀 Train and Predict"):
+        st.markdown("🔄 **Processing...** Please wait...")
+
         scaled_data, scaler = normalize_data(data)
+        if scaled_data is None:
+            st.error("⚠️ Not enough data for training. Try a different stock.")
+        else:
+            model = train_lstm(scaled_data)
+            predictions = model.predict(scaled_data[-50:].reshape(1, 50, 1))
 
-        X, y = prepare_data(scaled_data)
+            predicted_price = scaler.inverse_transform(predictions)[0, 0]
 
-        x_train, x_test, y_train, y_test = train_test_split(X,y, test_size=0.2, random_state=42)
-        model = build_model((x_train.shape[1], x_train.shape[2]))
-        model.fit(x_train, y_train, batch_size=32, epochs=5)
+            st.success(f"📈 **Predicted Next Price:** ${predicted_price:.2f}")
 
-        loss = model.evaluate(x_test, y_test, verbose=0)
-        st.write(f"Model Evaluation - MSE: {loss:.4f}")
+            # -------------------- Show Table --------------------
+            df_display = data.tail(10).reset_index()
+            df_display['Close'] = df_display['Close'].apply(lambda x: f"${x:.2f}")
 
-        model_cache[selected_stock] = (model, scaler)
+            st.markdown('<div class="table-container">', unsafe_allow_html=True)
+            st.write("📜 **Recent Data:**")
+            st.dataframe(df_display.style.set_table_styles([
+                {'selector': 'th', 'props': [('background-color', '#212529'), ('color', 'white'), ('font-size', '16px')]},
+                {'selector': 'td', 'props': [('font-size', '14px')]},
+            ]))
+            st.markdown('</div>', unsafe_allow_html=True)
 
-    st.write("Predicting prices for the next 10 days...")
-    predictions = []
-    input_sequence = scaled_data[-60:]
-
-    for day in range(10):
-        input_sequence = input_sequence.reshape(1, -1, 1)
-        predicted_price = model.predict(input_sequence)[0][0]
-        predictions.append(predicted_price)
-
-        input_sequence = np.append(input_sequence[0][1:], [[predicted_price]], axis = 0)
-
-    predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1))[:,0]
-
-    days = pd.date_range(start=pd.Timestamp.now() + pd.DateOffset(1), periods=10).strftime('%Y-%m-%d').tolist()
-    prediction_df = pd.DataFrame({
-        'Date': days,
-        "Predicted Price":predictions
-
-    })
-
-    st.write("Predicted Price:")
-    st.table(prediction_df)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=prediction_df['Date'],
-        y=prediction_df['Predicted Price'],
-        mode = 'lines+markers',
-        name = 'Predicted Prices'
-    ))
-    fig.update_layout(
-        title=f"10-Days Price Prediction for {selected_stock}",
-        xaxis_title="Date",
-        yaxis_title="Price ($)",
-        template = "plotly_dark"
-    )
-    st.plotly_chart(fig)
+            # -------------------- Plot Graph --------------------
+            st.markdown("📊 **Stock Price Trend:**")
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(data.index, data['Close'], label="Actual Price", color="#0077b6")
+            ax.axhline(y=predicted_price, color='r', linestyle="dashed", label="Predicted Price")
+            ax.legend()
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Price ($)")
+            ax.grid(True, linestyle="--", alpha=0.5)
+            st.pyplot(fig)
